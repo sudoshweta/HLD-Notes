@@ -1,0 +1,146 @@
+Problem Statement :Design a URL Shortner
+
+Requirements gather -- 
+    - size of short url 
+    - will url have an expiry
+    - if two reqests are for same url --> response should have different or same url
+    - will there a api rate limiter
+    - will there be a custom url as per request of the user
+
+1. Function Requirements
+    1. Service take long url and return short url(non guessable)
+    2. Default expiry time can be manually passed in request
+    3. There can be custom url request
+    4. if click on short url, redirection to original
+
+2. Non - functional Requirements
+    1. Highly available
+    2. url redirection with minimum latency(real time)
+    3. non predictable urls
+
+3. System APIs
+
+    1. POST / createShortUrl 
+    Request: api_dev_key, longUrl, custom_alias=false, expiry=false, user_id 
+    Response: return url_id, short url, url_key otherwise error code - 500
+    2. POST / deleteURl
+    Request: api_dev_key, url_key 
+    Response: return 'URL Succesfully deleted' otherwise error code - 500
+
+    Prevent abuse: keeping a limit on api_dev_key - like 15 in 1 sec
+
+4. Capacity Estimation 
+    1. Traffic
+        Given - 500M url shortnings created per month
+        System - read heavy - 100:1 read and write -- 500M * 100 per month --- 50 B/month
+        --> 50/30 B/day ---> 5/3 * 1000 M/day
+        // 1M requests = 12 request/s
+        // 1000 M = 12000
+        // 5/3 * 1000 * 12 K/s
+        // Requests per second Read ---> 200K/s
+        // Requests per second Write --> 2K/s
+    2. Storage
+
+        // 200 bytes of data(as 2 tables) for single url  
+        // 5 year storage: 500M/month * 12 * 5 * 200 bytes = 50 B * 12 * 10 = 6000 B = 6 TB
+    3. Memory or Cache Storage
+        // Cache for read 
+        // (50 B reqests / 30 ) per day * 0.2 (20 % cached) * 200 bytes  = 5/3 B * 40 Bytes = 200/3 B * bytes = 200/3 GB = 70 GB/Day 
+        // actual much less as duplicate requests for same url
+
+5. Database Design 
+
+    1. Url: url_id(PK), long_url, short_url, user_id --- > 100 bytes
+    2. Users:  used_id(PK), name, email
+
+    NOSQl DB -- 
+        1. Billions of records 
+        2. no such use case of relational user data
+        3. Easier to scale
+        4. Expiry, custom can be stored better
+        Choices: Mongo, DynamoDB, Cassandra
+
+6. Basic System Design and Algorithm
+    Problem : Trying to generate short and unique urls
+    Solution 1: Encode Actual URl --- ( SHA256 OR MD5)
+        1. Encode Actual url --- www.linkedin.com -- sdhj30ffjhewjhfewfiuhuefw29ewhfjhwehfjierjwuioeiwfoj (128 bit)
+        2. Base64 Encode and then store in DB 
+            - Lets take a 6 letter long key - 64 ^ 6  = 68.7 B possible strings
+
+        Issues :
+        1. Multiple user get same short url for same long url -- not acceptable
+        2. What if parts of the URL are URL-encoded 
+        Possible workaround: 
+            1. append an increasing seqence number - impact performace
+            2. append unique user_id - what if user is not logged in
+    
+    Solution 2: Generating Keys Offline
+        1. Have a Key Generation Service with saparate Key-DB which generates random 6 letter keys and store them into DB
+        2. For use, use any one of these pre computed unique urls - simple and fast
+        3. No duplication or collisions
+    
+        Issues : 
+        1. Concurrency : 
+            1. Multiple server trying to read same key from DB. How to solve this concurrency problem? 
+            2. How to keep a track of used or fresh keys?
+
+            Possible workaround:
+            1. Server can use KGS to read/mark from DB . Two Tables --- Used Keys & Fresh Keys
+            2. Keys given to server immediately transferred to used Keys table
+            3. KGS can always keep some keys in memory(Cache)so that it can quickly provide them whenever a server needs them.
+            4. For simplicity, KGS loads keys in cache and mark in used 
+            5. KGS ensures unique key to different serves -  for this synchronize (or get a lock on) before giving to server
+
+        2. KGS - single point of failure --- keep standby replica
+        3. Each App server can also cache some keys
+        4. How to perform a key loopup ?
+
+            lookup key in DB to get full url 
+                - if present - issue "HTTP 302 redirect" - passing stored url in Location field of request 
+                - if not - issue "HTTP 404 Not Found" -  redirect back to homepage
+
+
+    client ------------> Application server -----------> Key generation service
+                            |                               |
+                            v                               v
+                            DB                              Key DB
+
+
+7. Data Partition
+
+    1. Range based -- uneven distribution
+    2. Hash Based 
+
+8. Caching
+
+    1. How much Storage -- 80-20 Principle - 70 GB --- normally single server can hold - 256 GB -- only 1 server required
+    2. Cache Eviction policy --- LRU 
+    3. To further increase the efficiency, we can replicate our caching servers to distribute the load between them.
+    4. Update Cache Replicas ----> if cache miss --> hit db --- > before returning set cache
+                             ----> if a replica has it can ignore,  other replica will add a entry
+
+9. LB
+
+    We can add a Load balancing layer at three places in our system:
+
+    Between Clients and Application servers
+    Between Application Servers and database servers
+    Between Application Servers and Cache servers
+    Round Robin Algorithm - to distribute data
+
+10. Purging or DB cleanup
+    1. A separate Cleanup service can run periodically to remove expired links from our storage and cache. This service should be very lightweight and can be scheduled to run only when the user traffic is expected to be low.
+    2. We can have a default expiration time for each link (e.g., two years).
+    3. After removing an expired link, we can put the key back in the key-DB to be reused.
+
+
+11. Security and Permissions
+
+    1. permission level (public/private) with each URL in the database
+    2. We can also create a separate table to store UserIDs that have permission to see a specific URL otherwise send an error (HTTP 401) back
+
+
+         
+
+
+        
